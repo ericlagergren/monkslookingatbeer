@@ -38,15 +38,29 @@ func init() {
 	api = anaconda.NewTwitterApi(at, as)
 }
 
-func newPool(socket string) *redis.Pool {
-	createSocket(socket, 0755)
+func ParseRedistogoURL(u string) (string, string) {
+	redisUrl := u
+	redisInfo, _ := url.Parse(redisUrl)
+	server := redisInfo.Host
+	password := ""
+	if redisInfo.User != nil {
+		password, _ = redisInfo.User.Password()
+	}
+	return server, password
+}
 
+func newPool(socket string) *redis.Pool {
+	url, pass := ParseRedistogoURL(os.Getenv("REDISTOGO_URL"))
 	return &redis.Pool{
 		MaxIdle:     3,
 		IdleTimeout: 240 * time.Second,
 		Dial: func() (redis.Conn, error) {
-			c, err := redis.Dial("unix", socket)
+			c, err := redis.Dial(url, pass)
 			if err != nil {
+				return nil, err
+			}
+			if _, err := c.Do("AUTH", pass); err != nil {
+				c.Close()
 				return nil, err
 			}
 			return c, err
@@ -55,20 +69,6 @@ func newPool(socket string) *redis.Pool {
 			_, err := c.Do("PING")
 			return err
 		},
-	}
-}
-
-// createSocket will create a socket with the given perms
-// if it does not currently exist.
-func createSocket(name string, perms int) {
-	if _, err := os.Stat(name); os.IsNotExist(err) {
-		file, err := os.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_TRUNC, os.FileMode(perms))
-		if err != nil {
-			panic(err)
-		}
-		if err := file.Close(); err != nil {
-			panic(err)
-		}
 	}
 }
 
