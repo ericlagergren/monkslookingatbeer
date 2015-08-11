@@ -169,11 +169,11 @@ func checkErr(err error) {
 	}
 }
 
-func addURL(url string) {
+func addPost(title string) {
 	conn := pool.Get()
 	defer conn.Close()
 
-	_, err := conn.Do("SET", url)
+	_, err := conn.Do("SETEX", title, 2592000, "t")
 	if err != nil {
 		panic(err)
 	}
@@ -181,22 +181,32 @@ func addURL(url string) {
 
 func (t *tweets) doTweets() {
 	for _, tweet := range *t {
-		media, err := Upload(tweet.img)
+		// If there are API errors just skip that post.
+		media, err := api.UploadMedia(tweet.img)
 		if err != nil {
 			checkErr(err)
+			continue
 		}
-		err = Tweet(tweet.title, media)
-		checkErr(err)
-		addURL(tweet.img)
+		checkErr(Tweet(tweet.title, media))
+		addPost(tweet.title)
 	}
-}
-
-func Upload(img string) (anaconda.Media, error) {
-	return api.UploadMedia(img)
 }
 
 func main() {
 	api.SetDelay(5 * time.Minute)
 	api.EnableThrottling(5*time.Minute, 100)
-	CollectImages()
+
+	ticker := time.NewTicker(6 * time.Hour)
+	quit := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				CollectImages()
+			case <-quit:
+				ticker.Stop()
+				return
+			}
+		}
+	}()
 }
