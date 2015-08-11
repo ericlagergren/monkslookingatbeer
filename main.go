@@ -2,12 +2,14 @@ package main
 
 import (
 	"encoding/base64"
+	"fmt"
 	"io/ioutil"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sync"
 	"time"
 
 	"github.com/ChimeraCoder/anaconda"
@@ -18,7 +20,6 @@ import (
 const ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/44.0.2403.130 Safari/537.36"
 
 var (
-	api     *anaconda.TwitterApi
 	session = geddit.NewSession(ua)
 	pool    = newPool("/tmp/monks.sock")
 )
@@ -26,16 +27,13 @@ var (
 func init() {
 	ck := os.Getenv("CONSUMERKEY")
 	cs := os.Getenv("CONSUMERSECRET")
-	at := os.Getenv("ACCESSTOKEN")
-	as := os.Getenv("ACCESSSECRET")
 
-	if ck == "" || cs == "" || at == "" || as == "" {
+	if ck == "" || cs == "" {
 		panic("Cannot have empty API key/secret/token")
 	}
 
 	anaconda.SetConsumerKey(ck)
 	anaconda.SetConsumerSecret(cs)
-	api = anaconda.NewTwitterApi(at, as)
 }
 
 func ParseRedistogoURL(u string) (string, string) {
@@ -72,25 +70,28 @@ func newPool(socket string) *redis.Pool {
 	}
 }
 
-type tweets []*tweet
+type tweets struct {
+	api    *anaconda.TwitterApi
+	tweets []*tweet
+}
 type tweet struct {
 	title, img string
 }
 
-func CollectImages() {
+func CollectImages(api *anaconda.TwitterApi) {
 	subs, err := session.SubredditSubmissions("monkslookingatbeer", geddit.NewSubmissions, geddit.ListingOptions{})
 	if err != nil {
 		panic(err)
 	}
 
-	var t []*tweet
+	t := &tweets{api: api}
 
 	for _, v := range subs {
 		if !v.IsSelf {
 			if title, u := parse(v); u != nil && title != "" {
 				if img := getImage(u); img != "" {
 					if !havePosted(img) {
-						t = append(t, &tweet{title: title, img: img})
+						t.tweets = append(t.tweets, &tweet{title: title, img: img})
 					}
 				}
 			}
@@ -153,11 +154,14 @@ func getImage(u *url.URL) string {
 	return base64.StdEncoding.EncodeToString(cont)
 }
 
-func Tweet(status string, media anaconda.Media) error {
+func (t *tweets) Tweet(status string, media anaconda.Media) error {
 	v := url.Values{
 		"media_ids": []string{media.MediaIDString},
 	}
-	_, err := api.PostTweet(status, v)
+	_, err := t.api.PostTweet(status, v)
+	if err != nil {
+		fmt.Printf("Status: %q\n", status)
+	}
 	return err
 }
 
@@ -180,33 +184,47 @@ func addPost(title string) {
 }
 
 func (t *tweets) doTweets() {
-	for _, tweet := range *t {
+	for _, tweet := range t.tweets {
 		// If there are API errors just skip that post.
-		media, err := api.UploadMedia(tweet.img)
+		media, err := t.api.UploadMedia(tweet.img)
 		if err != nil {
 			checkErr(err)
 			continue
 		}
-		checkErr(Tweet(tweet.title, media))
+		checkErr(t.Tweet(tweet.title, media))
 		addPost(tweet.title)
 	}
 }
 
 func main() {
-	api.SetDelay(5 * time.Minute)
+	at := os.Getenv("ACCESSTOKEN")
+	as := os.Getenv("ACCESSSECRET")
+
+	if at == "" || as == "" {
+		panic("Cannot have empty API key/secret/token")
+	}
+
+	api := anaconda.NewTwitterApi(at, as)
+
 	api.EnableThrottling(5*time.Minute, 100)
+	api.SetDelay(5 * time.Minute)
 
 	ticker := time.NewTicker(6 * time.Hour)
 	quit := make(chan struct{})
+
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
 		for {
 			select {
 			case <-ticker.C:
-				CollectImages()
+				fmt.Println("collecting images")
+				CollectImages(api)
 			case <-quit:
 				ticker.Stop()
 				return
 			}
 		}
 	}()
+	wg.Wait()
 }
